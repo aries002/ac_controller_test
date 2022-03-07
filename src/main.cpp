@@ -36,7 +36,7 @@
 #define WIFI_PASSWORD "umsida1912"
 
 #define SERVER_HOST "iot.umsida.ac.id"
-#define SERVER_TOKEN "f7f9556bd99fa8e15365062ee13ea3dfd4ca8390"
+#define SERVER_TOKEN "6ed4b761d22f2a611ac664933ab76da121a66b89"
 #define TOKEN "1234567890"
 
 #define FIELD_SENSOR_SUHU 0
