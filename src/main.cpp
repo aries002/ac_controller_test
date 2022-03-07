@@ -1,4 +1,5 @@
 #define VERSION "alpha_testing_2"
+#define BOARD_V1
 
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
@@ -15,17 +16,27 @@
 
 #define PIN_POWER 0
 #define PIN_SIGNAL 13
+
+#ifdef BOARD_V1
 #define PIN_SDA 12
 #define PIN_SCL 14
 #define PZEM_RX_PIN 4
 #define PZEM_TX_PIN 5
-#define AC_READ_TIMEOUT 200
+#endif
+
+#ifdef BOARD_V3
+#define PIN_SDA 4
+#define PIN_SCL 5
+#define PZEM_RX_PIN 12
+#define PZEM_TX_PIN 14
+#endif
+#define AC_READ_TIMEOUT 3000
 
 #define WIFI_SSID "smartcampus@umsida.ac.id"
 #define WIFI_PASSWORD "umsida1912"
 
 #define SERVER_HOST "iot.umsida.ac.id"
-#define SERVER_TOKEN "5c7bb776b9a7cfd5bfb70b1dbe48d002155154a4"
+#define SERVER_TOKEN "f7f9556bd99fa8e15365062ee13ea3dfd4ca8390"
 #define TOKEN "1234567890"
 
 #define FIELD_SENSOR_SUHU 0
@@ -76,7 +87,7 @@ void ICACHE_FLASH_ATTR update_sensor();
 void ICACHE_FLASH_ATTR sensor_data_sender();
 void ICACHE_FLASH_ATTR do_update();
 void ICACHE_FLASH_ATTR webserver();
-
+// void ICACHE_FLASH_ATTR ac_controller(bool );
 void setup()
 {
   Serial.begin(115200);
@@ -149,7 +160,8 @@ void loop()
   if (WiFiMulti.run() == WL_CONNECTED)
   {
     update_sensor_ac();
-    if (millis() - last_sensor_update >= 4000)
+    ac_controller(false);
+    if (millis() - last_sensor_update >= 10000)
     {
       update_sensor();
       sensor_data_sender();
@@ -225,59 +237,113 @@ void ICACHE_FLASH_ATTR iot_umsida_sender(int field, float value)
   }
 }
 
-String ICACHE_FLASH_ATTR iot_umsida_get(int field)
-{
-  String result = "";
-  String host = String(SERVER_HOST);
+String iot_umsida_get(int field){
+  String result;
+  String host = SERVER_HOST;
   String uri = "/dev/api/";
-  uri += "key/" + String(SERVER_TOKEN) + "/";
-  uri += "field/" + String(field) + "/sts/";
+  uri += "key/"+String(SERVER_TOKEN)+"/";
+  uri += "field/"+String(field)+"/sts/";
   HTTPClient http;
-  Serial.print("Uri :  ");
+  Serial.print("Url :  ");
   Serial.println(uri);
-  if (http.begin(wifi_client, host, 8088, uri))
-  {
+  if(http.begin(wifi_client, String(host), 8088, String(uri))){
     int response_code = http.GET();
-
-    if (response_code > 0)
-    {
+    
+    if(response_code>0){
       Serial.print("HTTP Respose code : ");
       Serial.println(response_code);
-      result = http.getString();
+      String http_result = http.getString();
       Serial.println(result);
+      DynamicJsonBuffer json_buffer;
+      JsonObject& json_result = json_buffer.parse(http_result);
+      if(json_result.success()){
+        if(json_result.containsKey("value")){
+          String rest = json_result["value"];
+          result = rest;
+        }
+        else{
+          Serial.println("failed to get value");
+          String res;
+          json_result.printTo(res);
+          Serial.println(res);
+        }
+      }
+      else{
+        Serial.println("failed to parse response");
+        Serial.print("Response : ");
+        Serial.println(String(http_result));
+      }
     }
-    else
-    {
+    else{
       Serial.print("HTTP Error code : ");
       Serial.println(response_code);
       Serial.printf("error: %s\n\n", http.errorToString(response_code).c_str());
     }
-
+    
     http.end();
   }
-  else
-  {
+  else{
     Serial.println("Gagal menyambungkan ke IoT UMSIDA");
   }
   return result;
 }
 
 // controll AC power pin
-void ICACHE_FLASH_ATTR ac_controller(bool signal_now = false)
-{
-  req_signal_ac = true;
-  // if(uptime - ac_controller_last_run >= ac_controller_run_interval || signal_now){
-  // ac_controller_last_run = uptime;
-  // if(sensor_ac_status != sensor_ac_command){
-  // digitalWrite(PIN_POWER, LOW);
-  // delay(1000);
-  // digitalWrite(PIN_POWER, HIGH);
-  // }else if(signal_now){
-  //   digitalWrite(PIN_POWER, LOW);
-  //   delay(1000);
-  //   digitalWrite(PIN_POWER, HIGH);
-  // }
-  // }
+// AC Controller function is for send power on signal 
+bool last_ac_status = false;
+bool allow_remote_power = true;
+bool server_change = false;
+#ifndef AC_CONTROLLER_CHECK_INTERVAL
+#define AC_CONTROLLER_CHECK_INTERVAL 5000
+#endif
+unsigned long ac_controller_last_chek = 0;
+unsigned long ac_controller_last_send_status = 0;
+//check and controll ac power by server stat
+void ICACHE_FLASH_ATTR ac_controller(bool signal_now = false){
+  if(signal_now){
+    req_signal_ac = true;
+  }
+  else{
+    float f_sensor_ac_status;
+    if(sensor_ac_status){
+      f_sensor_ac_status = 1;
+    }else{
+      f_sensor_ac_status = 0;
+    }
+    if(millis() - ac_controller_last_send_status >= 5000){
+      iot_umsida_sender(FIELD_STATUS_AC, f_sensor_ac_status); //send status ac to server
+      ac_controller_last_send_status = millis();
+    }
+
+    if((last_ac_status != sensor_ac_status) && allow_remote_power){ //jika kondisi ac berubah kirmkan perubahan ke server
+      last_ac_status = sensor_ac_status;
+      Serial.println("AC condition change!");
+      if(!server_change){
+        Serial.println("From other.");
+        iot_umsida_sender(FIELD_COMMAND_AC, f_sensor_ac_status);
+      }
+      else{
+        Serial.println("From Server.");
+        server_change = false;
+      }
+    }
+    else{ // jika tidak ambil status dari server
+      if(millis() - ac_controller_last_chek > AC_CONTROLLER_CHECK_INTERVAL){
+        String result = iot_umsida_get(FIELD_COMMAND_AC);
+        Serial.print("AC Command : ");
+        Serial.println(result);
+        if ((result == "1" || result == "1.0")&& !sensor_ac_status){
+          req_signal_ac = true;
+          server_change = true;
+        }
+        else if ((result == "0" || result == "0.0") && sensor_ac_status){
+          req_signal_ac = true;
+          server_change = true;
+        }
+        ac_controller_last_chek = millis();
+      }
+    }
+  }
 }
 
 int ac_read_timer = 0;
@@ -301,6 +367,7 @@ void ICACHE_FLASH_ATTR update_sensor_ac()
     {
       sensor_ac_status = false;
     }
+    sensor_ac_last_update = millis();
   }
 }
 
@@ -344,68 +411,50 @@ void ICACHE_FLASH_ATTR sensor_data_sender()
   // sensor kelembapan
   iot_umsida_sender(FIELD_SENSOR_KELEMBAPAN, sensor_room_humid);
   // status AC
-  float tmp_ac_status;
-  if (sensor_ac_status)
-  {
-    tmp_ac_status = 1;
-  }
-  else
-  {
-    tmp_ac_status = 0;
-  }
-  iot_umsida_sender(FIELD_STATUS_AC, tmp_ac_status);
-  // check ac command
-  DynamicJsonBuffer Json_Buffer;
-  String result = iot_umsida_get(FIELD_COMMAND_AC);
-  if (result != "")
-  {
-    JsonObject &json_ac_stat = Json_Buffer.parseObject(result);
-    if (json_ac_stat.success())
-    {
-      if (json_ac_stat.containsKey("value"))
-      {
-        if (json_ac_stat["value"] == "1" && !sensor_ac_status)
-        {
-          req_signal_ac = true;
-        }
-        else if ((json_ac_stat["value"] == "0" || json_ac_stat["0.0"]) && sensor_ac_status)
-        {
-          req_signal_ac = true;
-        }
-        // iot_umsida_sender(FIELD_COMMAND_AC, 0);
-      }
-    }
-    else
-    {
-      Serial.println("Error parsing ac command");
-    }
-  }
+  // float tmp_ac_status;
+  // if (sensor_ac_status)
+  // {
+  //   tmp_ac_status = 1;
+  // }
+  // else
+  // {
+  //   tmp_ac_status = 0;
+  // }
+  // iot_umsida_sender(FIELD_STATUS_AC, tmp_ac_status);
+  // // check ac command
+  // DynamicJsonBuffer Json_Buffer;
+  // String result = iot_umsida_get(FIELD_COMMAND_AC);
+  // if (result != "")
+  // {
+  //   JsonObject &json_ac_stat = Json_Buffer.parseObject(result);
+  //   if (json_ac_stat.success())
+  //   {
+  //     if (json_ac_stat.containsKey("value"))
+  //     {
+  //       if (json_ac_stat["value"] == "1" && !sensor_ac_status)
+  //       {
+  //         req_signal_ac = true;
+  //       }
+  //       else if ((json_ac_stat["value"] == "0" || json_ac_stat["0.0"]) && sensor_ac_status)
+  //       {
+  //         req_signal_ac = true;
+  //       }
+  //       // iot_umsida_sender(FIELD_COMMAND_AC, 0);
+  //     }
+  //   }
+  //   else
+  //   {
+  //     Serial.println("Error parsing ac command");
+  //   }
+  // }
 
   // locate
   String result2 = iot_umsida_get(FIELD_LOCATE);
-  if (result2 != "")
-  {
-
-    JsonObject &json_locate = Json_Buffer.parseObject(result2);
-    if (json_locate.success())
-    {
-      if (json_locate.containsKey("value"))
-      {
-        if (json_locate["value"] == "1")
-        {
-          locate = true;
-        }
-        else if (json_locate["value"] == "0" || json_locate["0.0"])
-        {
-          locate = false;
-        }
-        // iot_umsida_sender(FIELD_COMMAND_AC, 0);
-      }
-    }
-    else
-    {
-      Serial.println("Error parsing ac command");
-    }
+  if(result2 == "1"){
+    locate = true;
+  }
+  else if(result2 == "0"){
+    locate = false;
   }
   // sensor tegangan listrik
   iot_umsida_sender(FIELD_SENSOR_TEGANGAN, sensor_listrik_voltage);
